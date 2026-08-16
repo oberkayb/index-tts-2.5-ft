@@ -1,0 +1,77 @@
+# IndexTTS-2.5 -> Turkish finetune.
+#
+# Use with:  python scripts/train.py --config configs/turkish.yaml
+# Anything you also pass on the command line wins over the values here.
+#
+# The defaults below are tuned for "add a language without breaking the other
+# five": LoRA on the GPT body, a frozen emotion branch, a hot language-embedding
+# row, and English/Chinese replay at 15% each.
+
+# --- paths -------------------------------------------------------------------
+# repo:       ../index-tts-2.5           # or set INDEXTTS25_REPO
+# model_dir:  ../index-tts-2.5/checkpoints
+output_dir: runs/tr_lora
+
+train_manifests:
+  - data/tr/pairs_train.jsonl::tr
+  # Replay keeps the base languages alive. Drop these only if you genuinely do
+  # not care about them; the weights are relative, so 1.0 / 0.15 / 0.15 means
+  # roughly 77% Turkish batches.
+  - data/replay/en_pairs.jsonl::en@0.15
+  - data/replay/zh_pairs.jsonl::zh@0.15
+
+val_manifests:
+  - data/tr/pairs_val.jsonl::tr
+  - data/replay/en_pairs_val.jsonl::en
+  - data/replay/zh_pairs_val.jsonl::zh
+
+# --- language ----------------------------------------------------------------
+lang: tr
+# Turkish already owns <|tr|> and row 9 of lang_embedding, so no alias is needed.
+# lang_alias: tt              # only for languages outside Whisper's list
+lang_init_from: es            # seed row 9 from Spanish: Latin script, similar
+                              # syllable timing, and it is actually trained
+lang_init_noise: 0.0
+train_all_lang_rows: false    # keep the mask on: other languages stay frozen
+
+# --- what gets updated -------------------------------------------------------
+trainable_mode: lora          # lora | partial | full
+lora_rank: 32
+lora_alpha: 64.0
+lora_dropout: 0.0
+lora_last_n_layers: 0         # 0 = adapt every block
+train_text_embedding: false   # the tiktoken vocab already covers Turkish
+preserve_emotion: true        # freeze the emotion encoders (disentanglement)
+
+# --- optimisation ------------------------------------------------------------
+batch_size: 8
+grad_accumulation: 4          # effective batch 32
+epochs: 12
+learning_rate: 1.0e-4         # LoRA tolerates this; use 1e-5 for mode=full
+lang_lr_multiplier: 10.0      # one new embedding row needs to move faster
+weight_decay: 0.01
+warmup_steps: 500
+min_lr_ratio: 0.05
+grad_clip: 1.0
+amp: bf16
+num_workers: 2
+seed: 1234
+
+# --- losses and augmentation -------------------------------------------------
+text_loss_weight: 0.2
+mel_loss_weight: 1.0
+label_smoothing: 0.0
+spk_noise_std: 0.01           # jitter on the CAMPPlus vector; stops the model
+                              # from memorising a small speaker set
+emo_dropout: 0.1
+emo_source: target            # emotion reference = the utterance being predicted
+prompt_emo_prob: 0.25         # ...but 25% of the time use the prompt's emotion,
+                              # which is what inference does by default
+
+# --- schedule ----------------------------------------------------------------
+log_interval: 20
+val_interval: 1000
+save_interval: 1000
+keep_checkpoints: 3
+resume: auto
+forgetting_guard: 0.05        # warn when a replay language drifts +0.05 in loss

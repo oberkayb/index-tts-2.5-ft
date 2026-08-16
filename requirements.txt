@@ -1,0 +1,6 @@
+# The upstream index-tts-2.5 environment already provides torch, transformers,
+# torchaudio, tiktoken, openai-whisper, omegaconf and modelscope. Install this
+# project *into that same environment*; the extras below are what the trainer
+# adds on top.
+tensorboard>=2.15
+tqdm>=4.66
