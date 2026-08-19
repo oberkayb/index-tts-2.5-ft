@@ -1,1 +1,34 @@
+# --- Ham veri & pipeline çıktıları (GB+) ---
 dataset/
+data/
+
+# --- Eğitim & export ---
+runs/
+*.pt
+*.pth
+*.npz
+
+# --- Sentez / studio wav ---
+out/
+*.wav
+*.mp3
+*.flac
+*.ogg
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.venv/
+venv/
+
+# --- Araç / OS ---
+.gradio/
+*.log
+.DS_Store
+Thumbs.db
+desktop.ini
