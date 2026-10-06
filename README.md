@@ -42,6 +42,7 @@ Practical consequences:
 * The old trainer’s precomputed `[32, dim]` conditioning latent is meaningless. Cache the **raw 192-d CAMPPlus vector** instead.
 * `UnifiedVoice.forward` in campplus mode does **not** apply `lang_embedding` (that path produces s2mel latents). Training forward is implemented in `losses.py` via `prepare_gpt_inputs` to match inference exactly.
 * **No vocab surgery** for Turkish: `<|tr|>` already exists, `lang_to_token("tr") = 9`, and row 9 of `lang_embedding` is in the checkpoint — just untrained. That row is what we fine-tune.
+* **But the text-embedding rows are untrained too.** tiktoken merges frequent words with their leading space into one token (` kaç`, ` evet`, ` çok`), and Turkish-only pieces (`ı`, `ş`, `ıyor`) are separate tokens. In the shipped checkpoint those rows sit at norm ~0.1, the same as never-used tokens, while trained English/Chinese tokens sit at 1–3. Frozen, they make short words indistinguishable: the model swaps ` kaç` for ` evet` or ` tekrar` for ` belki`, while multi-piece words and quoted words (`'kaç'` → `ka`+`ç`) read fine. `--train-text-rows` trains exactly the rows the corpus uses that the base model left untrained (37% of token occurrences on a 672 h YouTube corpus); everything else stays frozen.
 
 ### 2. Setup
 
@@ -96,6 +97,18 @@ python scripts/prepare_manifest.py \
 
 `--format`: `jsonl`, `csv`, `tsv`, `ljspeech`, `folders`. No speaker column? Use `--speaker-from-path 1`.
 
+ASR-transcribed corpora (YouTube, Emilia) benefit from the quality filters, which use the source `duration` field:
+
+```bash
+python scripts/prepare_manifest.py \
+    --format jsonl --input ../dataset/dataset.jsonl --audio-dir ../dataset \
+    --lang tr --output data/tr/utterances.jsonl \
+    --max-duration 25 --min-cps 6 --max-cps 25 --max-same-text 3 \
+    --exclude-regex "altyaz[ıi]|izlediğiniz için teşekkür"
+```
+
+`--min-cps`/`--max-cps` (characters per second) catch misaligned or hallucinated transcripts, `--max-same-text` caps repeated sponsor reads and intros. Relative audio paths are stored relative to the output manifest.
+
 #### 4.2 Feature extraction (GPU)
 
 ```bash
@@ -107,6 +120,8 @@ python scripts/preprocess.py \
 ```
 
 Each utterance → one `.npz`: `codes`, `text_ids`, `spk_emb`, `emo_vec`. Training never opens wav files again. Re-runs skip existing files (`--overwrite` to force).
+
+Clips longer than `--max-seconds` are **dropped**. (Older versions truncated the audio but kept the full transcript, which teaches the model to skip words; re-extract into a fresh `--output-dir` if your cache predates this.)
 
 Extraction matches `infer_v2_5`: w2v-BERT layer 17 + shipped mean/var, `EnhancedCodec.quantize`, 80-bin Kaldi fbank → CAMPPlus, frozen emotion encoder.
 
@@ -193,7 +208,8 @@ The main risk when adding a language is **catastrophic forgetting**. Five layers
 | Single speaker / voice clone | `lora` | 5e-5 | 8–16 | 5–10 |
 
 * **`--lang-lr-multiplier 10`**: one new embedding row needs a higher LR than the LoRA body. Don’t lower the default.
-* **`--lang-init-from`**: copy an existing row (e.g. `es` for Latin-script languages).
+* **`--lang-init-from`**: copy an existing row (e.g. `es` for Latin-script languages). With `--train-text-rows` it also seeds the `<|tr|>` control token from `<|es|>`.
+* **`--train-text-rows`**: train the untrained text-embedding rows the corpus uses (gradient-masked, own LR group via `--text-lr-multiplier 10`, no weight decay). `--text-row-init subword` seeds each row from trained sub-word pieces (` kaç` → `kach` pieces) instead of near-zero. The selection is written to `<output-dir>/text_rows.json`. Checkpoints grow by ~0.9 GB (table + Adam state); a run started with it cannot `--resume` a checkpoint made without it.
 * **`--text-loss-weight 0.2`**: auxiliary text CE. Don’t raise to 1.0.
 * **Effective batch**: aim for `batch_size × grad_accumulation ≥ 32`.
 * **VRAM**: batch 8 + bf16 + LoRA ≈ 24 GB. Tight? `--batch-size 4 --grad-accumulation 8`.
@@ -207,6 +223,7 @@ The main risk when adding a language is **catastrophic forgetting**. Five layers
 | Token id overflow | Re-download checkpoints (wrong tiktoken vocab) |
 | tokens/char > 0.5 | Improve text normalization (numbers, abbreviations) |
 | Loss down, audio bad | Frontend mismatch — same `--normalizer`/`--case` in preprocess and synthesize |
+| Short words swapped (` kaç` → ` evet`), quoting the word fixes it | Untrained text-embedding rows — `--train-text-rows` |
 | Prompt text in output | Self-pairs — fix speaker labels |
 | Base languages degraded | Lower LR, more replay, smaller rank, `--lora-last-n-layers 8` |
 | NaN / crash | Use `bf16` not `fp16`; `--grad-clip 1.0`; halve LR |
@@ -297,6 +314,10 @@ Prompt ve hedef **aynı konuşmacının farklı kayıtları** olmalı. Self-pair
 ### 4. Adım adım
 
 Manifest → `preprocess.py` (`.npz` cache) → `build_pairs.py` → `train.py` → `export.py` → `synthesize.py`.
+
+ASR ile yazıya dökülmüş veride `prepare_manifest.py` filtrelerini kullanın: `--max-duration 25 --min-cps 6 --max-cps 25 --max-same-text 3 --exclude-regex "..."`. `preprocess.py` artık `--max-seconds`'tan uzun klipleri **atar**; eski sürüm sesi kesip transkripti tam bırakıyordu (kelime atlamayı öğretir), eski cache'i yeni bir `--output-dir`'e yeniden çıkarın.
+
+**Kelime karışması** (` kaç` → ` evet`; tırnak içinde doğru okuma): taban model Türkçe token satırlarını hiç eğitmemiş (norm ~0,1). `--train-text-rows` yalnızca bu satırları gradyan maskesiyle eğitir; `configs/turkish.yaml`'da açık.
 
 Manifest sözdizimi: `yol[::dil[:alias]][@ağırlık]`.
 

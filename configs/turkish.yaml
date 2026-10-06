@@ -16,7 +16,8 @@ train_manifests:
   - data/tr/pairs_train.jsonl::tr
   # Replay keeps the base languages alive. Drop these only if you genuinely do
   # not care about them; the weights are relative, so 1.0 / 0.15 / 0.15 means
-  # roughly 77% Turkish batches.
+  # roughly 77% Turkish batches.  The files must exist (build them with steps
+  # 1-3 from a small EN/ZH corpus): the trainer stops on a missing manifest.
   - data/replay/en_pairs.jsonl::en@0.15
   - data/replay/zh_pairs.jsonl::zh@0.15
 
@@ -40,13 +41,26 @@ lora_rank: 32
 lora_alpha: 64.0
 lora_dropout: 0.0
 lora_last_n_layers: 0         # 0 = adapt every block
-train_text_embedding: false   # the tiktoken vocab already covers Turkish
+train_text_embedding: false   # whole table + positions: moves every language
 preserve_emotion: true        # freeze the emotion encoders (disentanglement)
+
+# The tiktoken vocab *covers* Turkish, but the base model never trained those
+# rows: ' kaç', ' evet', ' çok', 'ı', 'ş', '<|tr|>' sit at norm ~0.1 (trained
+# tokens: 1-3), which is why short words got swapped for each other.  On the
+# 672 h corpus 37% of all token occurrences land on such rows.  Train exactly
+# those rows; every row the base model already learned stays frozen.
+train_text_rows: true
+text_row_min_count: 1         # tokens seen fewer times stay untrained
+text_row_max_base_norm: 0.5   # "untrained" threshold on the base checkpoint
+text_row_init: subword        # seed from trained sub-word pieces (keep = no seed)
+text_lr_multiplier: 10.0      # rows start near zero and must grow
 
 # --- optimisation ------------------------------------------------------------
 batch_size: 8
 grad_accumulation: 4          # effective batch 32
-epochs: 12
+epochs: 4                     # ~490 h x 2 pairs/target: 4 epochs see about as
+                              # many samples (~1.1M) as the old 132 h x 12 run,
+                              # drawn from ~3.7x more distinct audio
 learning_rate: 1.0e-4         # LoRA tolerates this; use 1e-5 for mode=full
 lang_lr_multiplier: 10.0      # one new embedding row needs to move faster
 weight_decay: 0.01

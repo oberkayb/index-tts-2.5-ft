@@ -10,7 +10,9 @@ that are easy to get subtly wrong and expensive to discover after a training run
      mask confines updates to the rows we chose,
   3. LoRA adapters are exactly identity at init and merging them back into the
      base weights is numerically equivalent to running them,
-  4. exported state dicts are loadable by a stock ``UnifiedVoice``.
+  4. exported state dicts are loadable by a stock ``UnifiedVoice``,
+  5. text-embedding row training touches only the selected rows,
+  6. the Turkish normaliser and the manifest filters behave on real corner cases.
 
     python tests/smoke_test.py
 """
@@ -32,8 +34,9 @@ from indextts.gpt.model_v2 import UnifiedVoice  # noqa: E402
 
 from itts25ft.losses import LossConfig, compute_losses, total_loss  # noqa: E402
 from itts25ft.modeling import (  # noqa: E402
-    LanguageEmbeddingGradMask, TrainableSpec, apply_trainable_spec, export_inference_checkpoint,
-    has_lora, init_language_row, merge_lora, parameter_groups,
+    EmbeddingRowGradMask, LanguageEmbeddingGradMask, TrainableSpec, apply_trainable_spec,
+    export_inference_checkpoint, has_lora, init_language_row, init_text_rows_from_subwords,
+    merge_lora, parameter_groups, select_text_rows,
 )
 
 MODEL_DIM = 64
@@ -306,6 +309,128 @@ def test_data_pipeline(tmp: Path) -> None:
           "text={:.3f} mel={:.3f}".format(text_loss.item(), mel_loss.item()))
 
 
+class FakeEncoding:
+    """Just enough of tiktoken for init_text_rows_from_subwords."""
+
+    TOKENS = {50: " kaç".encode(), 51: b"<|tr|>", 52: b"\xff"}
+    SPLITS = {"kaç": [20, 21], "kach": [22, 23]}
+
+    def decode_single_token_bytes(self, token_id: int) -> bytes:
+        return self.TOKENS[token_id]
+
+    def encode(self, text: str, allowed_special=()) -> list:
+        return self.SPLITS.get(text, [99])
+
+
+def test_text_rows() -> None:
+    print("\n[7] text-embedding row training")
+    model = build_tiny()
+    weight = model.text_embedding.weight
+    untrained = [21, 50, 51, 52]
+    with torch.no_grad():
+        weight.mul_(2.0 / weight.norm(dim=1, keepdim=True))       # "trained": norm 2
+        weight[untrained] *= 0.05                                  # "untrained": norm 0.1
+
+    counts = {50: 10, 51: 5, 20: 7, 52: 1}
+    rows, stats = select_text_rows(model, counts, min_count=2)
+    check("selects used untrained rows only", rows == [50, 51], str(rows) + " " + str(stats))
+
+    init = init_text_rows_from_subwords(model, [50, 51, 52], FakeEncoding())
+    expected = (weight[22] + weight[23]) / 2
+    check("whole word seeded from respelled trained pieces",
+          bool(torch.allclose(weight[50], expected, atol=1e-6)), str(init))
+    check("control token and byte rows kept",
+          init["kept_special"] == 1 and init["kept_no_pieces"] == 1)
+
+    try:
+        apply_trainable_spec(build_tiny(), TrainableSpec(train_text_embedding=True, train_text_rows=True))
+        check("whole-table and row modes are exclusive", False)
+    except ValueError:
+        check("whole-table and row modes are exclusive", True)
+
+    apply_trainable_spec(model, TrainableSpec(mode="lora", lora_rank=4, train_text_rows=True))
+    check("text embedding is trainable", model.text_embedding.weight.requires_grad)
+    mask = EmbeddingRowGradMask(model.text_embedding.weight, rows, name="text_embedding")
+
+    groups = parameter_groups(model, base_lr=1e-4, lang_lr_multiplier=10.0, text_lr_multiplier=10.0)
+    text_group = [g for g in groups if g["name"] == "text_embedding"]
+    check("text rows get their own undecayed group",
+          len(text_group) == 1 and text_group[0]["weight_decay"] == 0.0
+          and abs(text_group[0]["lr"] - 1e-3) < 1e-12)
+    optimizer = torch.optim.AdamW(groups, lr=1e-4)
+
+    batch = fake_batch()
+    batch["text_ids"][:, :3] = torch.tensor([50, 51, 20])
+    before = model.text_embedding.weight.detach().clone()
+    text_loss, mel_loss, _ = compute_losses(model, batch, torch.device("cpu"), LossConfig())
+    total_loss(text_loss, mel_loss, LossConfig()).backward()
+    optimizer.step()
+
+    after = model.text_embedding.weight.detach()
+    moved = (after - before).abs().sum(dim=1) > 0
+    check("selected rows moved", bool(moved[50] and moved[51]))
+    check("every other row is bit-identical", int(moved.sum().item()) == 2,
+          str(int(moved.sum().item())) + " rows changed (row 20 was in the batch)")
+    mask.remove()
+
+
+def test_normalizer_and_manifest(tmp: Path) -> None:
+    print("\n[8] Turkish normaliser and manifest filters")
+    import json
+    import subprocess
+
+    from itts25ft.textfront import normalize_turkish
+
+    cases = {
+        "list percent no longer crashes": ("Real %1,5, bilemedin %2.", "Real yüzde bir virgül beş, bilemedin yüzde iki."),
+        "sentence-final number is cardinal": ("Yaşım 25.", "Yaşım yirmi beş."),
+        "number before a sentence opener is cardinal": ("Bunu 9. Yani son.", "Bunu dokuz. Yani son."),
+        "ordinal before a name": ("1. Dünya Savaşı, 5. Ordu", "birinci Dünya Savaşı, beşinci Ordu"),
+        "ordinal before a lowercase word": ("6. his", "altıncı his"),
+        "real word 'yak.' kept": ("Ateşi yak. Sonra gel.", "Ateşi yak. Sonra gel."),
+        "'yak.' before a number expanded": ("yak. 5 km", "yaklaşık beş kilometre"),
+        "leading zero read digit by digit": ("Tel. 0532", "telefon sıfır beş üç iki"),
+    }
+    for name, (raw, want) in cases.items():
+        try:
+            got = normalize_turkish(raw)
+        except Exception as exc:  # noqa: BLE001
+            got = repr(exc)
+        check(name, got == want, repr(got))
+
+    audio = tmp / "audio"
+    audio.mkdir(parents=True, exist_ok=True)
+    rows = [
+        ("a", "Merhaba dünya, bugün hava çok güzel.", 2.5),     # kept
+        ("b", "Merhaba dünya, bugün hava çok güzel.", 2.5),     # same text -> dropped
+        ("c", "İzlediğiniz için teşekkürler.", 28.0),           # 1 char/s -> dropped
+        ("d", "Uzun bir kayıt bu.", 40.0),                       # too long -> dropped
+        ("e", "Altyazı M.K.", 2.0),                              # regex -> dropped
+    ]
+    source = tmp / "source.jsonl"
+    with source.open("w", encoding="utf-8") as handle:
+        for uid, text, dur in rows:
+            (audio / (uid + ".mp3")).write_bytes(b"")
+            handle.write(json.dumps({"audio": "audio/" + uid + ".mp3", "text": text,
+                                     "speaker": "s1", "duration": dur}, ensure_ascii=False) + "\n")
+    out = tmp / "manifests" / "utterances.jsonl"
+    script = Path(__file__).resolve().parent.parent / "scripts" / "prepare_manifest.py"
+    result = subprocess.run(
+        [sys.executable, str(script), "--format", "jsonl", "--input", str(source),
+         "--audio-dir", str(tmp), "--lang", "tr", "--output", str(out),
+         "--max-duration", "30", "--min-cps", "5", "--max-same-text", "1",
+         "--exclude-regex", r"altyaz[ıi]"],
+        capture_output=True, text=True, encoding="utf-8",
+    )
+    kept = [json.loads(l) for l in out.read_text(encoding="utf-8").splitlines()] if out.is_file() else []
+    check("manifest filters keep exactly one clip", [r["id"] for r in kept] == ["a"],
+          (result.stderr.strip().splitlines() or [""])[-1] if result.returncode else str([r["id"] for r in kept]))
+    check("manifest carries duration", bool(kept) and kept[0].get("duration") == 2.5)
+    check("relative audio path resolves from the manifest folder",
+          bool(kept) and (out.parent / kept[0]["audio"]).resolve() == (audio / "a.mp3").resolve(),
+          kept[0]["audio"] if kept else "")
+
+
 def main() -> int:
     import tempfile
 
@@ -317,9 +442,11 @@ def main() -> int:
     test_conditioning_shape()
     test_language_isolation()
     test_lora_identity_and_merge()
+    test_text_rows()
     with tempfile.TemporaryDirectory() as tmp:
         test_parameter_groups_and_export(Path(tmp))
         test_data_pipeline(Path(tmp))
+        test_normalizer_and_manifest(Path(tmp))
 
     print("")
     print("=" * 66)

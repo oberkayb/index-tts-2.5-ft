@@ -11,7 +11,20 @@ Accepts the layouts people actually have:
 
 The output is one JSON object per utterance::
 
-    {"id": ..., "audio": ..., "text": ..., "speaker": ..., "lang": "tr"}
+    {"id": ..., "audio": ..., "text": ..., "speaker": ..., "lang": "tr", "duration": ...}
+
+``duration`` is carried over when the source has it (jsonl ``duration`` key, or
+a ``duration`` csv column); it enables the quality filters below and lets
+``preprocess.py`` skip over-long clips without decoding them.
+
+Quality filters for ASR-transcribed corpora (all off by default):
+
+  * ``--min-duration`` / ``--max-duration``  seconds, from the metadata
+  * ``--min-cps`` / ``--max-cps``            transcript characters per second;
+    outliers are usually misaligned or hallucinated transcripts
+  * ``--max-same-text N``                   keep at most N clips per identical
+    transcript (sponsor reads, intros, outros)
+  * ``--exclude-regex``                     drop transcripts matching a pattern
 
 Speaker identity matters more than usual here: pairing prompt and target
 utterances by speaker is what keeps the model cloning timbre rather than
@@ -30,6 +43,8 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
+import re
 import sys
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional
@@ -63,6 +78,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-chars", type=int, default=2, help="Drop transcripts shorter than this.")
     p.add_argument("--absolute-paths", action="store_true",
                    help="Store absolute audio paths instead of paths relative to the manifest.")
+    p.add_argument("--min-duration", type=float, default=0.0,
+                   help="Drop clips shorter than this (seconds, from the metadata duration).")
+    p.add_argument("--max-duration", type=float, default=0.0,
+                   help="Drop clips longer than this (seconds, from the metadata duration); 0 = off.")
+    p.add_argument("--min-cps", type=float, default=0.0,
+                   help="Drop transcripts slower than this many characters per second; 0 = off.")
+    p.add_argument("--max-cps", type=float, default=0.0,
+                   help="Drop transcripts faster than this many characters per second; 0 = off.")
+    p.add_argument("--max-same-text", type=int, default=0,
+                   help="Keep at most N clips sharing an identical transcript; 0 = off.")
+    p.add_argument("--exclude-regex", action="append", default=[],
+                   help="Drop transcripts matching this regex (repeatable, case-insensitive).")
     return p.parse_args()
 
 
@@ -105,6 +132,7 @@ def iter_jsonl(args: argparse.Namespace) -> Iterator[Dict[str, str]]:
                 "audio": str(record.get(audio_key, record.get("audio", ""))),
                 "text": str(record.get(text_key, record.get("text", ""))),
                 "speaker": str(record.get(speaker_key, record.get("speaker", "") or "")),
+                "duration": record.get("duration"),
             }
 
 
@@ -123,6 +151,7 @@ def iter_delimited(args: argparse.Namespace) -> Iterator[Dict[str, str]]:
                 "audio": record.get("audio", ""),
                 "text": record.get("text", ""),
                 "speaker": record.get("speaker", ""),
+                "duration": record.get("duration") or None,
             }
 
 
@@ -174,8 +203,13 @@ def main() -> int:
 
     records: List[Dict[str, object]] = []
     seen_ids: Dict[str, int] = {}
-    missing = short = 0
+    missing = short = no_duration = 0
     speakers: Dict[str, int] = {}
+    dropped = {"duration": 0, "chars/sec": 0, "same text": 0, "regex": 0}
+    same_text: Dict[str, int] = {}
+    excludes = [re.compile(rx, re.IGNORECASE) for rx in args.exclude_regex]
+    needs_duration = bool(args.min_duration or args.max_duration or args.min_cps or args.max_cps)
+    out_dir = args.output.resolve().parent
 
     for row in READERS[args.format](args):
         text = (row.get("text") or "").strip()
@@ -185,11 +219,35 @@ def main() -> int:
         if len(text) < args.min_chars:
             short += 1
             continue
+        if any(rx.search(text) for rx in excludes):
+            dropped["regex"] += 1
+            continue
+
+        try:
+            duration = float(row.get("duration") or 0.0)
+        except (TypeError, ValueError):
+            duration = 0.0
+        if duration > 0:
+            if duration < args.min_duration or (args.max_duration and duration > args.max_duration):
+                dropped["duration"] += 1
+                continue
+            cps = len(text) / duration
+            if (args.min_cps and cps < args.min_cps) or (args.max_cps and cps > args.max_cps):
+                dropped["chars/sec"] += 1
+                continue
+        elif needs_duration:
+            no_duration += 1
+
+        text_key = " ".join(text.lower().split())
+        if args.max_same_text and same_text.get(text_key, 0) >= args.max_same_text:
+            dropped["same text"] += 1
+            continue
 
         audio_path = _resolve_audio(raw_audio, args.audio_dir)
         if not audio_path.exists():
             missing += 1
             continue
+        same_text[text_key] = same_text.get(text_key, 0) + 1
 
         speaker = (row.get("speaker") or "").strip()
         if not speaker and args.speaker_from_path is not None:
@@ -204,14 +262,24 @@ def main() -> int:
         else:
             seen_ids[uid] = 0
 
-        stored = str(audio_path.resolve()) if args.absolute_paths else str(audio_path)
-        records.append({
+        # preprocess.py resolves relative paths against the manifest's folder,
+        # so store them relative to it, not to the current directory.
+        stored = str(audio_path.resolve())
+        if not args.absolute_paths:
+            try:
+                stored = os.path.relpath(stored, out_dir)
+            except ValueError:  # different drive on Windows: keep it absolute
+                pass
+        record: Dict[str, object] = {
             "id": uid,
             "audio": stored,
             "text": text,
             "speaker": speaker,
             "lang": args.lang.lower(),
-        })
+        }
+        if duration > 0:
+            record["duration"] = round(duration, 3)
+        records.append(record)
         speakers[speaker] = speakers.get(speaker, 0) + 1
 
     if not records:
@@ -223,6 +291,15 @@ def main() -> int:
     print("  speakers        : " + str(len(speakers)))
     print("  missing audio   : " + str(missing))
     print("  too-short text  : " + str(short))
+    for reason, n in dropped.items():
+        if n:
+            print("  dropped ({:<9}): {}".format(reason, n))
+    hours = sum(float(r.get("duration", 0.0)) for r in records) / 3600.0
+    if hours:
+        print("  kept duration   : {:.1f} h".format(hours))
+    if no_duration:
+        print("  WARNING: " + str(no_duration) + " records had no duration, so the duration and "
+              "chars/sec filters could not apply to them.")
     top = sorted(speakers.items(), key=lambda kv: -kv[1])[:8]
     print("  largest speakers: " + ", ".join(s + "(" + str(n) + ")" for s, n in top))
     if len(speakers) == 1:

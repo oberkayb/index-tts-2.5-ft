@@ -262,6 +262,29 @@ class PairedDataset(Dataset):
             counts[rec.lang] = counts.get(rec.lang, 0) + 1
         return counts
 
+    def target_text_token_counts(
+        self, lang: Optional[str] = None, report_every: int = 0
+    ) -> Tuple[Dict[int, int], int]:
+        """Count text token ids over the distinct *target* utterances.
+
+        Each utterance is counted once however many prompts it was paired with.
+        Returns ``(counts, n_utterances)``.
+        """
+        counts: Dict[int, int] = {}
+        seen = set()
+        for rec in self.records:
+            if lang is not None and rec.lang != lang:
+                continue
+            if rec.target_features in seen:
+                continue
+            seen.add(rec.target_features)
+            with np.load(str(rec.target_features)) as data:
+                for token_id in data["text_ids"].tolist():
+                    counts[token_id] = counts.get(token_id, 0) + 1
+            if report_every and len(seen) % report_every == 0:
+                print("  [text tokens] " + str(len(seen)) + " utterances scanned")
+        return counts, len(seen)
+
 
 # --------------------------------------------------------------------------- #
 # Collation
