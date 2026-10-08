@@ -1,11 +1,12 @@
 {
     "schema_version": 2,
-    "commit": "892cb24832a682b2393d19c279ed339440399486",
-    "indexed_at": "2026-10-06T18:56:58Z",
+    "commit": "817d9a9cf529bb30a5226eaf7b63b651e5f6b9ce",
+    "indexed_at": "2026-10-06T18:59:26Z",
     "project": "C-Users-oberk-Desktop-index2.5-index-tts-2.5-ft",
     "nodes": 327,
-    "edges": 1248,
-    "original_size": 4456448,
-    "compressed_size": 635631,
-    "compression_level": 3
+    "edges": 1253,
+    "original_size": 4325376,
+    "compressed_size": 610645,
+    "compression_level": 3,
+    "reconcile_basis": "git-clean-head"
 }

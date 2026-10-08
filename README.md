@@ -228,6 +228,45 @@ The main risk when adding a language is **catastrophic forgetting**. Five layers
 | Base languages degraded | Lower LR, more replay, smaller rank, `--lora-last-n-layers 8` |
 | NaN / crash | Use `bf16` not `fp16`; `--grad-clip 1.0`; halve LR |
 
+## WebUI (fine-tune'u denemek için)
+
+```
+webui.bat                       # http://127.0.0.1:7860, GPU 0
+webui.bat --gpu 1 --port 7861   # başka GPU / port; --qwen-emo duygu metni modunu açar
+```
+
+Upstream WebUI'a benzer, ek olarak:
+- **Checkpoint seçimi:** `../training-pipeline/work/runs/*/checkpoints/*.pt` (best.pt, step*.pt — export gerekmeden bellekte birleştirilir), `exported/*.pth`, stok model ya da elle yol.
+- **Türkçe** eğitimdeki frontend ile (`turkish` + `tr_lower`); diğer diller upstream normalizasyonuyla.
+- **Metin ve token önizleme:** modele giden token'lar; yeşil = fine-tune'da eğitilen satır, kırmızı = hiç eğitilmemiş satır (karışma riski).
+- Duygu modları, hız (duration factor), tüm üretim ayarları ve tohum.
+
+İlk çalıştırmada `--extra webui` ile gradio kurulur. Eğitime devam etmeden önce arayüzü kapat (GPU belleği).
+
+## MCP sunucusu (başka araçlardan seslendirme)
+
+`mcp_server.py` modeli bellekte tutar ve MCP araçları olarak sunar: `synthesize`, `list_voices`,
+`list_checkpoints`, `load_checkpoint`. Referans sesleri `voices/` klasörüne koy (dosya adı = ses adı)
+ya da `voice` parametresine tam yol ver. Çıktılar `outputs/mcp/` altına yazılır.
+
+İstemci yapılandırması (stdio; Claude Desktop, Cursor, VS Code vb.):
+
+```json
+{
+  "mcpServers": {
+    "indextts-tr": {
+      "command": "uv",
+      "args": ["run", "--quiet", "--project", "C:/Users/oberk/Desktop/github/index-tts", "--with", "mcp==2.3.0",
+               "python", "C:/Users/oberk/Desktop/github/index-tts-2.5-ft/mcp_server.py", "--gpu", "0"]
+    }
+  }
+}
+```
+
+Birden çok istemci tek modeli paylaşsın diye HTTP: `mcp_server.bat --transport http --port 8765` →
+`http://127.0.0.1:8765/mcp`. Varsayılan model, export edilmiş en yeni `*best*.pth`; `--checkpoint` ile değiştir.
+Model ilk açılışta ~1 dk yüklenir; eğitimle aynı anda çalıştırma (GPU belleği).
+
 ### 8. File map
 
 ```
