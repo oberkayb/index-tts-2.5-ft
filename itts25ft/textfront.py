@@ -82,6 +82,26 @@ _TR_ABBREV = {
     "no.": "numara", "tel.": "telefon", "yak.": "yaklaşık",
 }
 
+#: Abbreviations that are also ordinary words ("ateşi yak.", "ava çıktık, av.")
+#: expand only where the abbreviation reading is unambiguous: before a number
+#: ("yak. 5 km", "no. 12", "tel. 0532") or before a name ("Av. Mehmet").
+_TR_ABBREV_CONTEXT = {
+    "yak.": "number", "no.": "number", "tel.": "number",
+    "av.": "name", "sn.": "name",
+}
+
+#: Matches a formatted number without swallowing list punctuation ("%1,5, %2").
+_NUM = r"(\d+(?:[.,]\d+)*)"
+
+#: Capitalised words that open a new sentence rather than follow an ordinal:
+#: "... 25. Yani ..." is a cardinal plus a full stop, "5. Ordu" is an ordinal.
+_TR_SENTENCE_STARTERS = frozenset("""
+    yani bu şu o ama ve ben sen biz siz onlar şimdi sonra peki evet hayır ne neden
+    niye nasıl hani işte mesela çünkü ya hatta belki tabii tamam bak yoksa eğer
+    sadece bunu bunun onu onun bence aslında zaten yine hem de da ki burada orada
+    şöyle böyle daha en çok her hiç bunlar bana sana bize
+""".split())
+
 _TR_UNITS = {
     "km/h": "kilometre bölü saat",
     "km": "kilometre", "cm": "santimetre", "mm": "milimetre", "kg": "kilogram",
@@ -150,16 +170,53 @@ def tr_ordinal_to_words(n: int) -> str:
 
 
 def _tr_digit_string(digits: str) -> str:
-    return " ".join(_TR_ONES[int(d)] or "sıfır" for d in digits)
+    return " ".join(_TR_ONES[int(d)] or "sıfır" for d in digits if d.isdigit())
 
 
 def _tr_num_token(raw: str) -> str:
-    """Read a possibly-formatted numeric literal such as '1.234,50'."""
-    raw = raw.replace(".", "")
+    """Read a possibly-formatted numeric literal such as '1.234,50'.
+
+    The callers' ``[\\d.,]*`` also swallows list punctuation ("%1,5, %2"), so
+    trailing separators are dropped and stray commas in the fraction ignored.
+    """
+    raw = raw.strip(".,").replace(".", "")
     if "," in raw:
         whole, frac = raw.split(",", 1)
-        return tr_number_to_words(int(whole)) + " virgül " + _tr_digit_string(frac)
+        whole_words = tr_number_to_words(int(whole)) if whole.isdigit() else "sıfır"
+        return whole_words + " virgül " + _tr_digit_string(frac)
     return tr_number_to_words(int(raw))
+
+
+def _tr_expand_abbrev(text: str, abbr: str, full: str) -> str:
+    base = r"(?<!\w)(?i:" + re.escape(abbr) + ")"
+    mode = _TR_ABBREV_CONTEXT.get(abbr)
+    if mode is None:
+        return re.sub(base, full, text)
+    if mode == "number":
+        return re.sub(base + r"(?=\s*[\d+(])", full, text)
+
+    def before_name(m: "re.Match[str]") -> str:
+        following = m.group(1)
+        if following[0].isupper() and turkish_lower(following) not in _TR_SENTENCE_STARTERS:
+            return full
+        return m.group(0)
+
+    return re.sub(base + r"(?=\s+(\w+))", before_name, text)
+
+
+def _tr_integer(raw: str) -> str:
+    # "0532" / "007" are read digit by digit, everything else as a cardinal
+    if len(raw) > 1 and raw.startswith("0"):
+        return _tr_digit_string(raw)
+    return tr_number_to_words(int(raw))
+
+
+def _tr_ordinal_or_keep(m: "re.Match[str]") -> str:
+    following = m.group(2)
+    if following is None or turkish_lower(following) in _TR_SENTENCE_STARTERS:
+        # "Yaşım 25." / "... 9. Yani": cardinal + full stop; the integer pass reads it.
+        return m.group(0)
+    return tr_ordinal_to_words(int(m.group(1)))
 
 
 def normalize_turkish(text: str) -> str:
@@ -167,22 +224,22 @@ def normalize_turkish(text: str) -> str:
     text = unicodedata.normalize("NFC", text)
 
     for abbr, full in _TR_ABBREV.items():
-        text = re.sub(r"(?<!\w)" + re.escape(abbr), full, text, flags=re.IGNORECASE)
+        text = _tr_expand_abbrev(text, abbr, full)
 
     # percentages: %50 and 50%
-    text = re.sub(r"%\s*(\d[\d.,]*)", lambda m: "yüzde " + _tr_num_token(m.group(1)), text)
-    text = re.sub(r"(\d[\d.,]*)\s*%", lambda m: "yüzde " + _tr_num_token(m.group(1)), text)
+    text = re.sub(r"%\s*" + _NUM, lambda m: "yüzde " + _tr_num_token(m.group(1)), text)
+    text = re.sub(_NUM + r"\s*%", lambda m: "yüzde " + _tr_num_token(m.group(1)), text)
 
     # currency: 25TL / 25 lira-sign / $25
     for sym, word in _TR_CURRENCY.items():
         text = re.sub(
-            r"(\d[\d.,]*)\s*" + re.escape(sym) + r"(?!\w)",
+            _NUM + r"\s*" + re.escape(sym) + r"(?!\w)",
             lambda m, w=word: _tr_num_token(m.group(1)) + " " + w,
             text,
             flags=re.IGNORECASE,
         )
         text = re.sub(
-            re.escape(sym) + r"\s*(\d[\d.,]*)",
+            re.escape(sym) + r"\s*" + _NUM,
             lambda m, w=word: _tr_num_token(m.group(1)) + " " + w,
             text,
             flags=re.IGNORECASE,
@@ -204,8 +261,9 @@ def normalize_turkish(text: str) -> str:
             flags=re.IGNORECASE,
         )
 
-    # ordinals written as "3." at a token boundary
-    text = re.sub(r"\b(\d+)\.(?=\s|$)", lambda m: tr_ordinal_to_words(int(m.group(1))), text)
+    # ordinals written as "3." before a word ("3. sınıf", "1. Dünya Savaşı"),
+    # but not at the end of the text or before a sentence opener ("25. Yani")
+    text = re.sub(r"\b(\d+)\.(?=\s+(\w+)|\s*$)", _tr_ordinal_or_keep, text)
 
     # thousands separators: 1.234.567 -> 1234567
     text = re.sub(r"\b\d{1,3}(?:\.\d{3})+\b", lambda m: m.group(0).replace(".", ""), text)
@@ -216,7 +274,7 @@ def normalize_turkish(text: str) -> str:
         lambda m: tr_number_to_words(int(m.group(1))) + " virgül " + _tr_digit_string(m.group(2)),
         text,
     )
-    text = re.sub(r"\b\d+\b", lambda m: tr_number_to_words(int(m.group(0))), text)
+    text = re.sub(r"\b\d+\b", lambda m: _tr_integer(m.group(0)), text)
 
     return re.sub(r"\s+", " ", text).strip()
 
