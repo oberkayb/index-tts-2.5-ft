@@ -206,9 +206,12 @@ class FeatureExtractor:
     ) -> ExtractedFeatures:
         """Extract every cached feature for one utterance.
 
-        ``max_target_seconds`` bounds the *semantic code* side (the thing the GPT
-        must predict); ``max_ref_seconds`` bounds the conditioning side, matching
-        the 15 s clip upstream applies to reference audio.
+        ``max_target_seconds`` truncates the *semantic code* side (the thing the
+        GPT must predict).  Leave it ``None`` for training data: the transcript is
+        not truncated with it, so a cut clip pairs text with speech that is not
+        there.  ``preprocess.py`` drops over-long clips instead.
+        ``max_ref_seconds`` bounds the conditioning side, matching the 15 s clip
+        upstream applies to reference audio.
         """
         wav, sr, duration = self.load_audio(audio_path, max_seconds=max_target_seconds)
         wav_16k = self._resample(wav, sr, SPK_SR)

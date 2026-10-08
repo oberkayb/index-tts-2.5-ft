@@ -53,7 +53,9 @@ def parse_args() -> argparse.Namespace:
                    help="Disable <word|PHONES> annotation handling.")
     p.add_argument("--device", default="cuda")
     p.add_argument("--min-seconds", type=float, default=0.8)
-    p.add_argument("--max-seconds", type=float, default=25.0)
+    p.add_argument("--max-seconds", type=float, default=25.0,
+                   help="Skip clips longer than this. They are dropped, never truncated: the "
+                        "transcript covers the whole clip, so cut audio would teach word skipping.")
     p.add_argument("--max-ref-seconds", type=float, default=15.0,
                    help="Clip used for speaker/emotion conditioning (upstream default 15 s).")
     p.add_argument("--val-size", type=int, default=128, help="Utterances held out for validation.")
@@ -133,19 +135,27 @@ def main() -> int:
                 skipped_text += 1
                 continue
 
+            # Cheap pre-check from the manifest's duration (if step 1 recorded
+            # one); the decoded duration below remains the authority.
+            hint = float(record.get("duration") or 0.0)
+            if hint and hint > args.max_seconds + 0.05:
+                skipped_long += 1
+                continue
+
             if out_path.is_file() and not args.overwrite:
                 with np.load(out_path) as data:
                     code_len = int(data["codes"].shape[0])
                     text_len = int(data["text_ids"].shape[0])
                 cached += 1
             else:
-                feats = extractor.process(
-                    audio_path,
-                    max_ref_seconds=args.max_ref_seconds,
-                    max_target_seconds=args.max_seconds,
-                )
+                # No max_target_seconds: truncating the audio while keeping the full
+                # transcript would pair text with speech that is not there.
+                feats = extractor.process(audio_path, max_ref_seconds=args.max_ref_seconds)
                 if feats.duration < args.min_seconds:
                     skipped_short += 1
+                    continue
+                if feats.duration > args.max_seconds:
+                    skipped_long += 1
                     continue
                 code_len = int(feats.codes.shape[0])
                 if code_len > max_codes:
