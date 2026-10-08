@@ -94,7 +94,21 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--lora-dropout", type=float, default=0.0)
     p.add_argument("--lora-last-n-layers", type=int, default=0)
     p.add_argument("--train-last-n-layers", type=int, default=6)
-    p.add_argument("--train-text-embedding", action="store_true")
+    p.add_argument("--train-text-embedding", action="store_true",
+                   help="Train the whole text embedding table and positions (moves every language).")
+    p.add_argument("--train-text-rows", action="store_true",
+                   help="Train only the text-embedding rows that the target-language corpus uses "
+                        "and the base model left untrained (whole-word tokens such as ' kaç'). "
+                        "Recommended for a language the base model never saw.")
+    p.add_argument("--text-row-min-count", type=int, default=1,
+                   help="Skip tokens seen fewer times than this in the target-language targets.")
+    p.add_argument("--text-row-max-base-norm", type=float, default=0.5,
+                   help="A row counts as untrained below this base-checkpoint norm "
+                        "(trained rows sit at 1-3); <= 0 trains every row the corpus uses.")
+    p.add_argument("--text-row-init", default="subword", choices=("subword", "keep"),
+                   help="Seed the selected rows from the mean of their trained sub-word pieces.")
+    p.add_argument("--text-lr-multiplier", type=float, default=10.0,
+                   help="LR multiplier for the selected text-embedding rows.")
     p.add_argument("--no-train-heads", dest="train_heads", action="store_false", default=True)
     p.add_argument("--train-emotion", dest="preserve_emotion", action="store_false", default=True,
                    help="Unfreeze the emotion encoder (not recommended).")
@@ -128,8 +142,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         from omegaconf import OmegaConf
 
         file_cfg = OmegaConf.to_container(OmegaConf.load(args.config), resolve=True) or {}
+        # Map flags to their dest: --train-manifest fills train_manifests, so the
+        # config's train_manifests must not override it.
+        flag_dest = {opt: action.dest for action in p._actions for opt in action.option_strings}
         explicit = {
-            a.lstrip("-").split("=", 1)[0].replace("-", "_")
+            flag_dest.get(a.split("=", 1)[0], a.lstrip("-").split("=", 1)[0].replace("-", "_"))
             for a in (argv or sys.argv[1:])
             if a.startswith("--")
         }
@@ -161,6 +178,77 @@ def build_scheduler(optimizer, warmup_steps: int, total_steps: int, min_ratio: f
         return min_ratio + (1.0 - min_ratio) * cosine
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
+def prepare_text_rows(args, model, train_ds, slot, model_dir, output_dir: Path) -> List[int]:
+    """Select the target language's untrained text-embedding rows and seed them.
+
+    Must run on the base weights, before ``apply_trainable_spec`` and before a
+    resume overwrites the rows, so the selection is identical across restarts.
+    """
+    from indextts.utils.tokenizer import get_tokenizer
+
+    from itts25ft.modeling import init_text_rows_from_subwords, select_text_rows
+
+    cache = output_dir / ("text_token_counts_" + slot.code + ".json")
+    counts = None
+    if cache.is_file():
+        cached = json.loads(cache.read_text(encoding="utf-8"))
+        if cached.get("records") == len(train_ds):
+            counts = {int(k): int(v) for k, v in cached["counts"].items()}
+            n_utts = int(cached["utterances"])
+    if counts is None:
+        print(">> counting text tokens of the " + slot.code + " targets ...")
+        counts, n_utts = train_ds.target_text_token_counts(slot.code, report_every=20000)
+        cache.write_text(
+            json.dumps({"records": len(train_ds), "utterances": n_utts, "counts": counts}),
+            encoding="utf-8",
+        )
+    if not counts:
+        raise SystemExit("--train-text-rows: no " + slot.code + " targets in the train manifests.")
+
+    rows, stats = select_text_rows(
+        model, counts, min_count=args.text_row_min_count, max_base_norm=args.text_row_max_base_norm
+    )
+    tokenizer = get_tokenizer(multilingual=True, model_dir=str(model_dir))
+    share = stats["occurrences_on_selected"] / max(1, stats["occurrences_total"])
+    print(">> text rows: {} of {} token ids used by {} {} utterances ({:.1%} of token "
+          "occurrences); {} ids the base model already trained stay frozen".format(
+              stats["selected"], stats["used_ids"], n_utts, slot.code, share,
+              stats["skipped_already_trained"]))
+    top = sorted(rows, key=lambda i: -counts.get(i, 0))[:15]
+    print("   most frequent: " + ", ".join(
+        repr(tokenizer.decode([i])) + " x" + str(counts[i]) for i in top))
+
+    # The <|xx|> control token opens every target segment and is as untrained as
+    # the language row; seed it from the same source language.
+    control = tokenizer.encode(slot.prefix.strip(), allowed_special="all")
+    if args.lang_init_from and len(control) == 1 and control[0] in rows:
+        source = tokenizer.encode("<|" + args.lang_init_from.lower() + "|>", allowed_special="all")
+        if len(source) == 1:
+            with torch.no_grad():
+                weight = model.text_embedding.weight
+                weight[control[0]].copy_(weight[source[0]])
+            print("   control token " + slot.prefix.strip() + " seeded from <|"
+                  + args.lang_init_from.lower() + "|>")
+
+    init_stats: Dict[str, int] = {}
+    if args.text_row_init == "subword":
+        init_stats = init_text_rows_from_subwords(
+            model, rows, tokenizer, max_base_norm=args.text_row_max_base_norm
+        )
+        print("   sub-word init: " + json.dumps(init_stats))
+
+    (output_dir / "text_rows.json").write_text(json.dumps({
+        "lang": slot.code,
+        "min_count": args.text_row_min_count,
+        "max_base_norm": args.text_row_max_base_norm,
+        "init": args.text_row_init,
+        "stats": stats,
+        "init_stats": init_stats,
+        "rows": rows,
+    }), encoding="utf-8")
+    return rows
 
 
 def trainable_state_dict(model) -> Dict[str, torch.Tensor]:
@@ -266,6 +354,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     model = build_gpt(cfg, model_dir, device=device, checkpoint=args.base_checkpoint)
 
     target_slot = resolve(args.lang, args.lang_alias) if args.lang else None
+    if target_slot is not None and target_slot.slot not in PRETRAINED_LANGS:
+        from itts25ft.modeling import UNTRAINED_ROW_NORM
+
+        row_norm = model.lang_embedding.weight[target_slot.lang_id].detach().float().norm().item()
+        if row_norm >= UNTRAINED_ROW_NORM:
+            print("")
+            print("!! WARNING: the base checkpoint already has a trained <|" + target_slot.slot
+                  + "|> language row (norm {:.2f}; the shipped 2.5 model has ~0.17).".format(row_norm))
+            print("!! This looks like an earlier finetune, not the stock model. To start from")
+            print("!! scratch pass --base-checkpoint <model-dir>/gpt.pth.stock (and the same flag")
+            print("!! to export.py), or restore the stock gpt.pth.")
+            print("")
+
     if target_slot is not None:
         from itts25ft.modeling import init_language_row
 
@@ -275,6 +376,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         note = init_language_row(model, target_slot.lang_id, source_id, args.lang_init_noise)
         print(">> language row: " + target_slot.describe() + " - " + note)
 
+    text_rows: List[int] = []
+    if args.train_text_rows:
+        if target_slot is None:
+            raise SystemExit("--train-text-rows needs --lang.")
+        text_rows = prepare_text_rows(args, model, train_ds, target_slot, model_dir, output_dir)
+
     spec = TrainableSpec(
         mode=args.trainable_mode,
         lora_rank=args.lora_rank,
@@ -283,6 +390,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         lora_last_n_layers=args.lora_last_n_layers,
         train_last_n_layers=args.train_last_n_layers,
         train_text_embedding=args.train_text_embedding,
+        train_text_rows=args.train_text_rows,
         train_heads=args.train_heads,
         preserve_emotion=args.preserve_emotion,
     )
@@ -298,11 +406,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         grad_mask = LanguageEmbeddingGradMask(model, trainable_rows)
         print(">> lang_embedding gradient restricted to row(s): " + str(trainable_rows))
 
+    text_mask = None
+    if args.train_text_rows:
+        from itts25ft.modeling import EmbeddingRowGradMask
+
+        text_mask = EmbeddingRowGradMask(model.text_embedding.weight, text_rows, name="text_embedding")
+        print(">> text_embedding gradient restricted to " + str(len(text_rows))
+              + " rows (the table above is listed in full, but only these rows move)")
+
     # ------------------------------------------------------------------ #
     # Optimisation
     # ------------------------------------------------------------------ #
     groups = parameter_groups(
-        model, args.learning_rate, args.lang_lr_multiplier, args.weight_decay
+        model, args.learning_rate, args.lang_lr_multiplier, args.weight_decay,
+        text_lr_multiplier=args.text_lr_multiplier if args.train_text_rows else None,
     )
     if not groups:
         raise SystemExit("Nothing is trainable - check --trainable-mode and the freeze patterns.")
@@ -424,6 +541,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 for group in optimizer.param_groups:
                     if group.get("name") == "lang_embedding":
                         writer.add_scalar("train/lr_lang", group["lr"], global_step)
+                    elif group.get("name") == "text_embedding":
+                        writer.add_scalar("train/lr_text_rows", group["lr"], global_step)
 
             # -- validation ----------------------------------------------- #
             if val_loader is not None and args.val_interval and global_step % args.val_interval == 0:
