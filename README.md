@@ -46,6 +46,19 @@ webui.bat                        # http://127.0.0.1:7860 (GPU 0); --gpu 1 --port
 
 Pick any checkpoint (`best.pt`, `step*.pt`, exported `.pth`, stock). The token preview colours rows trained by the fine-tune green and rows that are still untrained red.
 
+### Language adapters (stock model + Turkish on demand)
+
+A merged `gpt.pth` applies the Turkish LoRA to every language. An adapter keeps it apart: the stock `gpt.pth` loads unchanged and the adapter switches on only for its own language, so zh/en/ja/es/ar output stays bit-identical to stock IndexTTS-2.5.
+
+```bash
+python scripts/extract_adapter.py --checkpoint runs/tr_lora/checkpoints/best.pt --out adapters/tr.safetensors   # exact LoRA factors
+python scripts/extract_adapter.py --merged checkpoints/tr/gpt.pth --out adapters/tr_v2.safetensors             # from a merged gpt.pth (diff + SVD)
+adapter_webui.bat                # http://127.0.0.1:7862 (GPU 0); --gpu 1 --port 7863 --adapter adapters\tr_v2.safetensors
+python tests/adapter_check.py --adapter adapters/tr_v2.safetensors --prompt ref.wav --merged checkpoints/tr/gpt.pth
+```
+
+An adapter (`.safetensors`, ~55 MB in fp16) holds the 96 LoRA factors of the GPT blocks, the language's text-embedding rows, its `lang_embedding` row and `mel_head`. `text_head` is left out because inference never uses it. Use the adapter without `use_accel` and DeepSpeed: both copy the GPT weights, so the adapter would not reach them. `itts25ft/adapter.py` holds the format, the extraction code and `LanguageAdapter` (`attach`, `set_active`, `detach`).
+
 ### MCP server
 
 Tools: `synthesize`, `list_voices`, `list_checkpoints`, `load_checkpoint`. Put reference voices into `voices/` (file name = voice name). Output goes to `outputs/mcp/`.
@@ -66,9 +79,10 @@ To share one loaded model between several clients, run `mcp_server.bat --transpo
 - The published checkpoint replaces only `gpt.pth`. All other weights come from IndexTeam/IndexTTS-2.5.
 
 ```
-itts25ft/   env, lang, textfront, extractors, data, modeling, losses, utils
-scripts/    pipeline steps 0-5      tests/smoke_test.py      configs/turkish.yaml
-webui_ft.py, mcp_server.py
+itts25ft/   env, lang, textfront, extractors, data, modeling, losses, utils, adapter
+scripts/    pipeline steps 0-5, extract_adapter.py
+tests/      smoke_test.py, adapter_check.py      configs/turkish.yaml
+webui_ft.py, adapter_webui.py, mcp_server.py
 ```
 
 ---
@@ -112,6 +126,19 @@ webui.bat                        # http://127.0.0.1:7860 (GPU 0); --gpu 1 --port
 ```
 
 Herhangi bir checkpoint seçebilirsin (`best.pt`, `step*.pt`, export edilmiş `.pth` ya da orijinal model). Token önizlemesinde fine-tune'da eğitilen satırlar yeşil, hâlâ eğitilmemiş satırlar kırmızı görünür.
+
+### Dil adaptörleri (orijinal model + gerektiğinde Türkçe)
+
+Birleştirilmiş `gpt.pth` Türkçe LoRA'yı bütün dillere uygular. Adaptör onu ayrı tutar: orijinal `gpt.pth` değişmeden yüklenir, adaptör yalnızca kendi dilindeki çağrılarda açılır. Böylece zh/en/ja/es/ar çıktısı orijinal IndexTTS-2.5 ile bit bit aynı kalır.
+
+```bash
+python scripts/extract_adapter.py --checkpoint runs/tr_lora/checkpoints/best.pt --out adapters/tr.safetensors   # LoRA çarpanları birebir
+python scripts/extract_adapter.py --merged checkpoints/tr/gpt.pth --out adapters/tr_v2.safetensors             # birleştirilmiş gpt.pth'ten (fark + SVD)
+adapter_webui.bat                # http://127.0.0.1:7862 (GPU 0); --gpu 1 --port 7863 --adapter adapters\tr_v2.safetensors
+python tests/adapter_check.py --adapter adapters/tr_v2.safetensors --prompt ref.wav --merged checkpoints/tr/gpt.pth
+```
+
+Adaptör (`.safetensors`, fp16'da ~55 MB) şunları taşır: GPT bloklarının 96 LoRA çarpanı, dilin metin tablosu satırları, `lang_embedding` satırı ve `mel_head`. `text_head` alınmaz, çünkü çıkarımda hiç kullanılmaz. Adaptörü `use_accel` ve DeepSpeed olmadan kullan: ikisi de GPT ağırlıklarını kopyaladığı için adaptör onlara ulaşamaz. Biçim, çıkarma kodu ve `LanguageAdapter` (`attach`, `set_active`, `detach`) `itts25ft/adapter.py` içinde.
 
 ### MCP sunucusu
 

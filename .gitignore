@@ -6,6 +6,7 @@ data/
 runs/
 *.pt
 *.pth
+adapters/*.safetensors
 *.npz
 
 # --- Sentez / studio wav ---
