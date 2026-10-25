@@ -33,3 +33,9 @@ venv/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# --- Pipeline: yerel ayar ve çıktılar ---
+pipeline/pipeline.toml
+pipeline/work/
+
+outputs/

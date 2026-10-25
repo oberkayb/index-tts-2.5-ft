@@ -1,0 +1,101 @@
+# IndexTTS-2.5 dil eğitimi pipeline'ı: tek ayar dosyası.
+#
+# İlk çalıştırmada bu dosya pipeline.toml olarak kopyalanır; kendi ayarlarını
+# pipeline.toml'da (ya da arayüzde) değiştir. pipeline.toml git'e girmez.
+# Göreli yollar bu dosyanın bulunduğu klasöre göre çözülür.
+# Dataset klasörü YALNIZCA OKUNUR: bir çıktı yolu oraya düşerse pipeline durur.
+
+[paths]
+dataset_jsonl  = 'dataset/dataset.jsonl'   # her satır: {"audio": ..., "text": ..., "speaker": ...[, "duration": ...]}
+dataset_root   = 'dataset'                 # jsonl'deki göreli "audio" yolları buna göre
+upstream_repo  = '../../index-tts'         # IndexTTS kaynak kodu + ortamı
+ft_repo        = '..'                      # bu repo (itts25ft)
+model_dir      = '../../index-tts/checkpoints'   # IndexTTS-2.5 ağırlıkları; gpt.pth ORİJİNAL model olmalı
+work_dir       = 'work'                    # manifest, feature cache, eğitim, eval çıktıları
+
+# 00_setup: model_dir boşsa ağırlıklar buradan kopyalanır. Boş bırakılırsa ('')
+# Hugging Face'ten indirilir (IndexTeam/IndexTTS-2.5, ~5,5 GB).
+seed_model_dir = ''
+seed_gpt       = 'gpt.pth'
+
+[run]
+name = 'tr_run'     # work/runs/<name> ve work/data/<lang> altında çıktılar
+lang = 'tr'
+
+[gpu]
+# nvidia-smi sırası. Liste verilirse o adım birden çok GPU'da çalışır.
+# Her adım başlamadan önce GPU'nun boş VRAM'ini kontrol eder; yer yoksa OOM yerine durur.
+preprocess = [0]    # [0, 1] -> iki GPU'da paralel kodlama (GPU başına bir işçi)
+train      = [0]    # [0] -> tek GPU (scripts/train.py); [0, 1] -> iki GPU (train_multi_gpu.py)
+eval       = 0
+
+[manifest]
+max_duration  = 25.0
+min_cps       = 6.0     # karakter/saniye; altı genelde sessizliğe uydurulmuş ASR metni
+max_cps       = 25.0    # üstü genelde hizasız transkript
+max_same_text = 3       # aynı metinli klip sınırı (sponsor okumaları, intro/outro)
+exclude_regex = ['altyaz[ıi]', 'izlediğiniz için teşekkür']
+
+[preprocess]
+normalizer   = 'turkish'
+case         = 'tr_lower'
+min_seconds  = 1.0
+max_seconds  = 25.0     # manifest.max_duration ile aynı tut; uzun klipler atılır, kesilmez
+val_speakers = 20       # doğrulama için bütünüyle ayrılan konuşmacı sayısı
+chunks       = 24       # paralel modda iş parçası sayısı (yük dengesi + kaldığı yerden devam)
+min_free_gb  = 9.0      # bir GPU'da işçi başlatmak için gereken boş VRAM
+
+[pairs]
+pairs_per_target = 2
+
+[lora]
+# Eğitilen kısım. Sonuç ayrı bir adaptördür (.safetensors); orijinal model değişmez.
+mode          = 'lora'   # lora | partial | full
+rank          = 32       # büyüdükçe kapasite artar; adaptör rank başına ~0,94 MB büyür
+alpha         = 64.0     # ölçek = alpha / rank; rank'i büyütürken alpha'yı da büyüt (genelde 2 x rank)
+learning_rate = 1e-4
+train_heads   = true     # mel_head'i de eğit (adaptöre girer)
+
+[train]
+config            = 'configs/turkish.yaml'   # ft_repo'ya göre; metin satırı eğitimi burada açık
+batch_size        = 4
+grad_accumulation = 8      # efektif batch 32
+epochs            = 4
+save_interval     = 500    # kesinti olursa en fazla bu kadar adım kaybedilir
+keep_checkpoints  = 3
+num_workers       = 2
+min_free_gb       = 12.0   # eğitim GPU'sunda gereken boş VRAM; 04_train --probe gerçek tepeyi ölçer
+rank_accum        = []     # iki GPU: adım başına micro-batch payı, örn. [5, 3] (toplam = grad_accumulation)
+min_free_gb_aux   = 9.0    # ikinci GPU'da gereken boş VRAM
+early_stop_patience = 4    # doğrulama kaybı bu kadar ölçüm iyileşmezse dur; 0 = kapalı (iki GPU modunda)
+extra_args        = []     # train.py'ye aynen eklenir, örn. ['--lora-dropout', '0.05']
+
+[export]
+format = 'adapter'   # adapter: orijinal modelle çalışan .safetensors | merged: tam gpt.pth
+
+[eval]
+sentences      = 'test_sentences_tr.txt'
+num_speakers   = 2          # doğrulama konuşmacılarından otomatik prompt seçimi
+prompts        = []         # ya da elle: ['C:/yol/ref1.wav', 'C:/yol/ref2.wav']
+cross_lingual  = true       # aynı sesle en/es/zh/ja kontrolü
+whisper_model  = 'turbo'
+min_free_gb    = 9.0
+seed           = 1234
+do_sample          = true
+temperature        = 0.8
+top_p              = 0.8
+top_k              = 30
+num_beams          = 3
+repetition_penalty = 10.0
+
+# --- İsteğe bağlı: replay ----------------------------------------------------
+# Adaptör ayrı kaldığı için diğer diller etkilenmez; replay gerekmez. Merged
+# (birleştirilmiş) çıktı alacaksan diğer dilleri korumak için açabilirsin.
+#
+# [[replay]]
+# lang       = 'en'
+# jsonl      = 'D:/corpora/en/metadata.jsonl'
+# root       = 'D:/corpora/en'
+# weight     = 0.15
+# normalizer = 'none'
+# case       = 'lower'

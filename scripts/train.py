@@ -132,6 +132,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--keep-checkpoints", type=int, default=3)
     p.add_argument("--export-every-save", action="store_true",
                    help="Also write an inference-ready gpt.pth at every save.")
+    p.add_argument("--final-export", choices=("adapter", "merged", "none"), default="adapter",
+                   help="At the end: an adapter (.safetensors, runs on stock IndexTTS-2.5), a merged gpt.pth, or nothing.")
+    p.add_argument("--normalizer", default=None, help="Text frontend used in preprocessing (stored in the adapter).")
+    p.add_argument("--case", default=None, help="Case mode used in preprocessing (stored in the adapter).")
     p.add_argument("--resume", default="", help="Checkpoint path, or 'auto'.")
     p.add_argument("--forgetting-guard", type=float, default=0.0,
                    help="Warn when a replay language's val loss rises this much above baseline.")
@@ -477,6 +481,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     started = time.time()
     last_log = time.time()
     stop = False
+    # Başka bir süreçten (örn. pipeline arayüzünden) durdurma: output_dir/STOP dosyası.
+    stop_file = output_dir / "STOP"
+    stop_file.unlink(missing_ok=True)
 
     print("")
     print(">> " + str(total_steps) + " optimiser steps ("
@@ -599,6 +606,24 @@ def main(argv: Optional[List[str]] = None) -> int:
                 stop = True
                 break
 
+            if stop_file.is_file():
+                stop_file.unlink(missing_ok=True)
+                path = ckpt_manager.save({
+                    "trainable": trainable_state_dict(model),
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict(),
+                    "scaler": scaler.state_dict() if scaler.is_enabled() else None,
+                    "step": global_step,
+                    "epoch": epoch,
+                    "baselines": baselines,
+                    "spec": vars(spec),
+                }, global_step)
+                writer.close()
+                print("")
+                print(">> stopped (STOP file); step {} saved: {}".format(global_step, path))
+                print(">> run the same command again to resume")
+                return 0
+
         if stop:
             break
 
@@ -612,7 +637,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         for key, value in sorted(final_metrics.items()):
             print("  {:<28}: {:.4f}".format(key, value))
 
-    ckpt_manager.save({
+    final_ckpt = ckpt_manager.save({
         "trainable": trainable_state_dict(model),
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict(),
@@ -622,6 +647,22 @@ def main(argv: Optional[List[str]] = None) -> int:
         "baselines": baselines,
         "spec": vars(spec),
     }, global_step)
+    writer.close()
+
+    print("")
+    print("training finished in " + human_time(time.time() - started))
+    if args.final_export == "adapter":
+        from itts25ft.adapter import adapter_from_checkpoint
+
+        base = Path(args.base_checkpoint) if args.base_checkpoint else model_dir / "gpt.pth"
+        path = adapter_from_checkpoint(
+            base, final_ckpt, output_dir / "adapters" / "{}_step{}.safetensors".format(args.lang, global_step),
+            lang=args.lang, normalizer=args.normalizer, case=args.case, extra_meta={"step": global_step},
+        )
+        print("adapter: " + str(path) + "  (runs on stock IndexTTS-2.5; see adapter_webui.py)")
+        return 0
+    if args.final_export == "none":
+        return 0
 
     result = export_inference_checkpoint(
         model, output_dir / "exported" / "gpt.pth",
@@ -633,10 +674,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             "mode": args.trainable_mode,
         },
     )
-    writer.close()
-
-    print("")
-    print("training finished in " + human_time(time.time() - started))
     print("inference weights: " + str(result["path"])
           + "  (merged " + str(result["merged_adapters"]) + " adapters)")
     print("")

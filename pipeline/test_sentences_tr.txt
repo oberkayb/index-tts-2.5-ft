@@ -1,0 +1,38 @@
+# Kabul testi cümleleri. '#' ile başlayan satırlar yok sayılır.
+# Değiştirirsen eski eval sonuçlarıyla karşılaştırma bozulur; yeni dosya açıp
+# pipeline.toml'da [eval] sentences ile göster.
+
+# --- Eski modelde karışan kısa kelimeler (tek token'lı kelimeler) ---
+Mimir. Odin ve Thor'un kötülüklerine dair kaç tane hikâye anlatmışsındır?
+Bugün toplantıya kaç kişi geldi?
+Bu kitabı şimdiye kadar kaç kere okudun?
+Kaç tane elma kaldı?
+Bunu bana bir kez daha tekrar söyler misin?
+Belki yarın sabah tekrar uğrarım.
+Dış kapıyı kilitlemeyi unutma, içerisi çok soğuk.
+Evet, bugün hava çok güzel ama başka bir gün gibi değil.
+Yani aslında her şey bir şey gibi görünüyor.
+Çünkü o gün de aynı şeyi söylemiştin.
+
+# --- Sayılar, sıra sayıları, yüzde ---
+Yaşım 25.
+Saat 14:30'da istasyonun önünde buluşalım.
+Fiyatlar yüzde 20 arttı ve ürün 1.250 lira oldu.
+1. Dünya Savaşı 1914'te başladı ve dört yıl sürdü.
+Üçüncü sınıftayken 6. kattaki daireye taşındık.
+
+# --- Türkçeye özgü sesler ve uzun ekler ---
+Işıklı ırmağın kıyısında ılık bir rüzgâr esiyordu.
+Çağrı ağır işçiliğe rağmen ödülünü üç gün önce aldı.
+Kötülüklerine rağmen anlattıklarını dinlemekten hiç sıkılmadık.
+Görüşebildiğimiz için gerçekten çok mutlu olduk.
+
+# --- Günlük konuşma, sorular ---
+Merhaba, nasılsın? Uzun zamandır görüşemedik.
+Yarın sabah kaçta yola çıkıyoruz?
+Hangisini istersin, bunu mu yoksa şunu mu?
+Ne zaman, nerede ve kiminle buluşacağız?
+Tamam, olur. Ben de birazdan geliyorum.
+
+# --- Yabancı isimler ---
+Michael Jackson'ın şarkılarını hâlâ dinliyorum.

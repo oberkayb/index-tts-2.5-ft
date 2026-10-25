@@ -177,6 +177,29 @@ def extract_from_trainer(base_path: str | Path, checkpoint_path: str | Path):
     return lora, rows, replace, report
 
 
+def default_frontend(lang: str) -> Tuple[str, str]:
+    """(normalizer, case) the training frontend uses for ``lang``."""
+    return ("turkish", "tr_lower") if lang == "tr" else ("none", "lower")
+
+
+def adapter_from_checkpoint(base_path: str | Path, checkpoint_path: str | Path, out_path: str | Path,
+                            lang: str, normalizer: Optional[str] = None, case: Optional[str] = None,
+                            extra_meta: Optional[Mapping[str, object]] = None) -> Path:
+    """Trainer checkpoint -> adapter file next to stock IndexTTS-2.5 (used at the end of training)."""
+    import time
+
+    lora, rows, replace, report = extract_from_trainer(base_path, checkpoint_path)
+    norm, cs = default_frontend(lang)
+    meta = {
+        "lang": lang, "lang_token": "<|{}|>".format(lang),
+        "normalizer": normalizer or norm, "case": case or cs, "rank": report["ranks"],
+        "source": {"type": "checkpoint", "path": str(checkpoint_path)},
+        "base_model": "IndexTeam/IndexTTS-2.5", "created": time.strftime("%Y-%m-%d %H:%M"),
+        **dict(extra_meta or {}),
+    }
+    return save_adapter(out_path, lora, rows, replace, meta)
+
+
 # --------------------------------------------------------------------------- #
 # runtime
 # --------------------------------------------------------------------------- #

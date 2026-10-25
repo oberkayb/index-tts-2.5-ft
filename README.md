@@ -22,10 +22,35 @@ Adds a **new language** (reference config: Turkish) to [IndexTTS-2.5](https://hu
 
 Result on our Turkish run (490 h): WER on unseen speakers dropped from 7.1% (step 8000) to 6.3% (step 12000). The word swaps are gone, and the other languages pass the probes.
 
-### Quick start
+### Environment
+
+You need git, [uv](https://docs.astral.sh/uv/) and an NVIDIA GPU with a recent driver. The commands are the same on Linux, Windows and WSL. Clone both repos into the same parent folder:
 
 ```bash
-pip install -r requirements.txt                              # inside the index-tts-2.5 env
+git clone https://github.com/index-tts/index-tts.git
+git clone https://github.com/oberkayb/index-tts-2.5-ft.git
+cd index-tts
+uv sync --all-extras                                  # creates index-tts/.venv (Python 3.10–3.11, CUDA torch)
+uv pip install -r ../index-tts-2.5-ft/requirements.txt
+uv run hf download IndexTeam/IndexTTS-2.5 --local-dir checkpoints   # ~5.5 GB; the pipeline's setup step can do this too
+```
+
+Run everything with that environment: `uv run --project <path>/index-tts python <script>`, or activate `index-tts/.venv`. `checkpoints/gpt.pth` must stay the original model: training writes adapters and checkpoints elsewhere.
+
+### Training pipeline and UI
+
+`pipeline/` runs the steps below in order, checks free GPU memory before each one and resumes where it stopped. Its web UI starts and stops the steps, plots the training loss, streams the log and edits the settings (run name, LoRA rank/alpha/learning rate, GPUs, paths):
+
+```bash
+cd index-tts-2.5-ft/pipeline
+uv run --project ../../index-tts python ui/server.py      # http://127.0.0.1:7870 (Windows: ui.bat)
+```
+
+The result is a language adapter; the original weights stay unchanged. See [pipeline/README.md](pipeline/README.md).
+
+### Quick start (scripts)
+
+```bash
 python scripts/check_setup.py --lang tr --load-model        # 0. verify repo, weights, language slot
 python scripts/prepare_manifest.py ...                      # 1. manifest (+ quality filters)
 python scripts/preprocess.py ...                            # 2. feature cache (.npz)
@@ -74,13 +99,14 @@ To share one loaded model between several clients, run `mcp_server.bat --transpo
 ### Notes
 
 - **Data:** 20 h+ and 50+ speakers is comfortable. Prompt and target must be different clips of the same speaker.
-- **Keeping old languages:** language-row gradient mask, LoRA merged on export, optional replay (`path::en@0.15`), frozen emotion branch.
+- **Keeping old languages:** the default output is an adapter that is active only for its own language, so the other languages keep the stock weights. A merged `gpt.pth` (`--final-export merged`) applies the LoRA everywhere; for that case there is a language-row gradient mask and optional replay (`path::en@0.15`).
 - **Troubleshooting:** if short words get swapped, use `--train-text-rows`. If the loss looks fine but the audio is bad, the frontend doesn't match. If the old languages degrade, lower the LR, add more replay or use a smaller rank.
 - The published checkpoint replaces only `gpt.pth`. All other weights come from IndexTeam/IndexTTS-2.5.
 
 ```
 itts25ft/   env, lang, textfront, extractors, data, modeling, losses, utils, adapter
 scripts/    pipeline steps 0-5, extract_adapter.py
+pipeline/   step runner, pipeline.example.toml, ui/ (web UI)
 tests/      smoke_test.py, adapter_check.py      configs/turkish.yaml
 webui_ft.py, adapter_webui.py, mcp_server.py
 ```
@@ -103,10 +129,35 @@ webui_ft.py, adapter_webui.py, mcp_server.py
 
 Türkçe eğitimimizdeki sonuç (490 saat): eğitimde görülmemiş konuşmacılarda kelime hata oranı (WER) adım 8000'de %7,1, adım 12000'de %6,3. Kelime karışması giderildi; diğer diller kontrol testlerini geçiyor.
 
-### Hızlı başlangıç
+### Ortam
+
+Gerekenler: git, [uv](https://docs.astral.sh/uv/) ve güncel sürücülü bir NVIDIA GPU. Komutlar Linux, Windows ve WSL'de aynı. İki repoyu aynı üst klasöre klonla:
 
 ```bash
-pip install -r requirements.txt                              # index-tts-2.5 ortamında
+git clone https://github.com/index-tts/index-tts.git
+git clone https://github.com/oberkayb/index-tts-2.5-ft.git
+cd index-tts
+uv sync --all-extras                                  # index-tts/.venv oluşur (Python 3.10–3.11, CUDA'lı torch)
+uv pip install -r ../index-tts-2.5-ft/requirements.txt
+uv run hf download IndexTeam/IndexTTS-2.5 --local-dir checkpoints   # ~5,5 GB; pipeline'ın setup adımı da indirebilir
+```
+
+Her şeyi bu ortamla çalıştır: `uv run --project <yol>/index-tts python <script>` ya da `index-tts/.venv`'i etkinleştir. `checkpoints/gpt.pth` orijinal model olarak kalmalı; eğitim adaptörleri ve checkpoint'leri başka yere yazar.
+
+### Eğitim pipeline'ı ve arayüz
+
+`pipeline/` aşağıdaki adımları sırayla çalıştırır, her adımdan önce boş GPU belleğini kontrol eder ve kaldığı yerden devam eder. Web arayüzü adımları başlatıp durdurur, eğitim kaybını çizer, logu canlı gösterir ve ayarları düzenler (run adı, LoRA rank/alpha/öğrenme hızı, GPU'lar, yollar):
+
+```bash
+cd index-tts-2.5-ft/pipeline
+uv run --project ../../index-tts python ui/server.py      # http://127.0.0.1:7870 (Windows: ui.bat)
+```
+
+Sonuç bir dil adaptörüdür; orijinal ağırlıklar değişmez. Ayrıntılar: [pipeline/README.md](pipeline/README.md).
+
+### Hızlı başlangıç (scriptler)
+
+```bash
 python scripts/check_setup.py --lang tr --load-model        # 0. repo, ağırlık ve dil slotunu doğrula
 python scripts/prepare_manifest.py ...                      # 1. manifest (+ kalite filtreleri)
 python scripts/preprocess.py ...                            # 2. özellik önbelleği (.npz)
@@ -147,6 +198,6 @@ Araçlar: `synthesize`, `list_voices`, `list_checkpoints`, `load_checkpoint`. Re
 ### Notlar
 
 - **Veri:** 20 saat üzeri ve 50'den fazla konuşmacı rahat bir başlangıç. Prompt ve hedef, aynı konuşmacının farklı kayıtları olmalı.
-- **Eski dilleri korumak:** dil satırı gradyan maskesi, export'ta birleştirilen LoRA, isteğe bağlı replay (`yol::en@0.15`), donuk duygu dalı.
+- **Eski dilleri korumak:** varsayılan çıktı yalnızca kendi dilinde açılan bir adaptördür; diğer diller orijinal ağırlıklarla çalışır. Birleştirilmiş `gpt.pth` (`--final-export merged`) LoRA'yı her dile uygular; o durum için dil satırı gradyan maskesi ve isteğe bağlı replay (`yol::en@0.15`) var.
 - **Sorun giderme:** Kısa kelimeler karışıyorsa `--train-text-rows` kullan. Loss iyi ama ses bozuksa metin işleme ayarları eğitimle uyuşmuyordur. Eski diller bozulduysa öğrenme oranını düşür, replay'i artır ya da rank'i küçült.
 - Yayınlanan checkpoint yalnızca `gpt.pth` dosyasını değiştirir; diğer ağırlıklar IndexTeam/IndexTTS-2.5'ten gelir.

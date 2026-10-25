@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Adaptör Eğitimi</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/app.css">
+<script>
+  try { const t = localStorage.getItem("theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
+</head>
+<body>
+<header class="top">
+  <div class="ident">
+    <h1 id="run-name">…</h1>
+    <p id="run-line" class="run-line">Ayarlar okunuyor</p>
+  </div>
+  <div class="top-right">
+    <div id="gpus" class="gpus" aria-label="GPU durumu"></div>
+    <button type="button" id="theme" class="theme"></button>
+  </div>
+</header>
+
+<div id="banner" class="banner" hidden></div>
+
+<section class="chain-wrap" aria-label="Adımlar">
+  <ol id="chain" class="chain"></ol>
+  <div id="drawer" class="drawer"></div>
+</section>
+
+<main class="grid">
+  <section class="panel monitor" aria-labelledby="mon-title">
+    <div class="panel-head">
+      <h2 id="mon-title">Eğitim</h2>
+      <div id="train-stats" class="stats"></div>
+    </div>
+    <div class="chart-box">
+      <canvas id="chart" height="260" aria-label="Kayıp grafiği"></canvas>
+      <div id="chart-read" class="chart-read" hidden></div>
+      <p id="chart-empty" class="empty" hidden>Bu run için henüz eğitim logu yok. Eğitimi başlatınca kayıp eğrisi burada çizilir.</p>
+    </div>
+    <div class="legend">
+      <span><i class="sw sw-raw"></i>adım kaybı</span>
+      <span><i class="sw sw-ema"></i>yumuşatılmış</span>
+      <span><i class="sw sw-val"></i>doğrulama</span>
+    </div>
+
+    <div class="console-head">
+      <h2>Çıktı</h2>
+      <span id="log-src" class="log-src"></span>
+      <label class="follow"><input type="checkbox" id="follow" checked> Sona kaydır</label>
+    </div>
+    <pre id="console" class="console" tabindex="0" aria-live="off"></pre>
+  </section>
+
+  <section class="panel settings" aria-labelledby="set-title">
+    <div class="panel-head">
+      <h2 id="set-title">Ayarlar</h2>
+      <span id="cfg-path" class="cfg-path"></span>
+    </div>
+    <form id="settings" autocomplete="off"></form>
+    <div class="save-bar">
+      <span id="save-msg" class="save-msg" role="status"></span>
+      <button type="button" id="revert" class="btn ghost" disabled>Geri al</button>
+      <button type="button" id="save" class="btn primary" disabled>Ayarları kaydet</button>
+    </div>
+  </section>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
