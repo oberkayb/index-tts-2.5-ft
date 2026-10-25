@@ -193,6 +193,7 @@ async def synthesize(
     emotions: Optional[Dict[str, float]] = None,
     emotion_weight: float = 0.65,
     emotion_text: str = "",
+    emotion_audio: str = "",
     duration_factor: float = 1.0,
     seed: int = -1,
     return_audio: bool = False,
@@ -209,6 +210,8 @@ async def synthesize(
             melancholic, surprised, calm. Örn. {"happy": 0.6, "calm": 0.2}. Verilmezse referans sesin duygusu.
         emotion_weight: Duygunun etkisi (0-1; varsayılan 0.65).
         emotion_text: Duyguyu metinle tarif et (yalnız sunucu --qwen-emo ile açıldıysa).
+        emotion_audio: İsteğe bağlı duygu referans sesi (wav dosyasının tam yolu); duygu bu kayıttan alınır,
+            etkisi emotion_weight ile ayarlanır. emotions ile birlikte kullanılamaz.
         duration_factor: Konuşma süresi katsayısı; 1.0 normal, <1 hızlı, >1 yavaş (0.5-2.0).
         seed: Tekrarlanabilir sonuç için tohum; -1 rastgele.
         return_audio: true ise wav içeriği de yanıtta döner (istemci ses gösterebiliyorsa).
@@ -223,6 +226,14 @@ async def synthesize(
         if unknown:
             raise ToolError("Bilinmeyen duygu: {}. Geçerli: {}".format(", ".join(unknown), ", ".join(EMOTIONS)))
         vec_values = [max(0.0, min(1.0, float(emotions.get(name, 0.0)))) for name in EMOTIONS]
+    emo_prompt = None
+    if emotion_audio:
+        emo_path = Path(emotion_audio).expanduser()
+        if not emo_path.is_file():
+            raise ToolError("emotion_audio bulunamadı: " + emotion_audio)
+        if vec_values:
+            raise ToolError("emotions ve emotion_audio birlikte kullanılamaz; birini seç.")
+        emo_prompt = str(emo_path.resolve())
     if not 0.5 <= float(duration_factor) <= 2.0:
         raise ToolError("duration_factor 0.5 ile 2.0 arasında olmalı.")
 
@@ -256,7 +267,7 @@ async def synthesize(
             try:
                 app.tts.infer(
                     spk_audio_prompt=str(prompt), text=model_text, output_path=str(out), lang=lang,
-                    emo_alpha=float(emotion_weight), emo_vector=vec,
+                    emo_audio_prompt=emo_prompt, emo_alpha=float(emotion_weight), emo_vector=vec,
                     use_emo_text=bool(emotion_text), emo_text=emotion_text or None,
                     duration_factor=float(duration_factor), text_normalization=normalize,
                     do_sample=True, temperature=0.8, top_p=0.8, top_k=30, num_beams=3,
